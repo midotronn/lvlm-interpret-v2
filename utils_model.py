@@ -1,11 +1,9 @@
-
 import logging
 import base64
 from io import BytesIO
 from PIL import Image
 import torch
-# from torchvision.transforms.functional import to_pil_image
-from transformers import LlavaForConditionalGeneration, AutoProcessor
+from transformers import LlavaForConditionalGeneration, AutoProcessor, AutoModelForVision2Seq
 from transformers import BitsAndBytesConfig
 
 func_to_enable_grad = '_sample'
@@ -19,8 +17,22 @@ except ModuleNotFoundError:
 logger = logging.getLogger(__name__)
 
 def get_processor_model(args):
-    #outputs: attn_output, attn_weights, past_key_value
-    processor = AutoProcessor.from_pretrained(args.model_name_or_path)
+    
+    # Add OpenVLA/Embodied-CoT detection to choose the correct model and processor loading path.
+    is_openvla = (
+        ('openvla' in str(args.model_name_or_path).lower()) or 
+        ('ecot' in str(args.model_name_or_path).lower()) or 
+        ('embodied-cot' in str(args.model_name_or_path).lower())
+    )
+
+    # Load processor; enable trust_remote_code for OpenVLA-style models that require custom code.
+    try:
+        processor = AutoProcessor.from_pretrained(
+            args.model_name_or_path, 
+            trust_remote_code=True if is_openvla else False
+        )
+    except Exception:
+        processor = AutoProcessor.from_pretrained(args.model_name_or_path)
 
     if args.load_4bit:
         quant_config = BitsAndBytesConfig(
@@ -36,55 +48,75 @@ def get_processor_model(args):
     else:
         quant_config = None
 
-    model = LlavaForConditionalGeneration.from_pretrained(
-        args.model_name_or_path, torch_dtype=torch.bfloat16, 
-        quantization_config=quant_config, low_cpu_mem_usage=True, device_map=args.device_map
-    )
-    model.vision_tower.config.output_attentions = True
+    # Load model: use AutoModelForVision2Seq for OpenVLA, otherwise standard Llava model.
+    if is_openvla:
+        model = AutoModelForVision2Seq.from_pretrained(
+            args.model_name_or_path, torch_dtype=torch.bfloat16,
+            quantization_config=quant_config, low_cpu_mem_usage=True, device_map=args.device_map,
+            trust_remote_code=True
+        )
+        setattr(model, 'is_openvla', True)
+    else:
+        model = LlavaForConditionalGeneration.from_pretrained(
+            args.model_name_or_path, torch_dtype=torch.bfloat16, 
+            quantization_config=quant_config, low_cpu_mem_usage=True, device_map=args.device_map
+        )
+        if hasattr(model, 'vision_tower') and hasattr(model.vision_tower, 'config'):
+            model.vision_tower.config.output_attentions = True
 
-    # Relevancy map
-    # set hooks to get attention weights
+    # Initialize attention containers; only register hooks for non-OpenVLA models.
     model.enc_attn_weights = []
-    #outputs: attn_output, attn_weights, past_key_value
-    def forward_hook(module, inputs, output): 
-        if output[1] is None:
-            logger.error(
-                ("Attention weights were not returned for the encoder. "
-                "To enable, set output_attentions=True in the forward pass of the model. ")
-            )
-            return output
-        
-        output[1].requires_grad_(True)
-        output[1].retain_grad()
-        model.enc_attn_weights.append(output[1])
-        return output
-
-    hooks_pre_encoder, hooks_encoder = [], []
-    for layer in model.language_model.model.layers:
-        hook_encoder_layer = layer.self_attn.register_forward_hook(forward_hook)
-        hooks_pre_encoder.append(hook_encoder_layer)
-
-    model.enc_attn_weights_vit = []
-
-
-    def forward_hook_image_processor(module, inputs, output): 
-        if output[1] is None:
-            logger.warning(
-                ("Attention weights were not returned for the vision model. "
-                 "Relevancy maps will not be calculated for the vision model. " 
-                 "To enable, set output_attentions=True in the forward pass of vision_tower. ")
-            )
+    
+    if not getattr(model, 'is_openvla', False):
+        # Register language model self-attention hooks to capture encoder attentions.
+        def forward_hook(module, inputs, output): 
+            if isinstance(output, tuple) and len(output) > 1:
+                attn = output[1]
+            else:
+                attn = None
+            if attn is None:
+                logger.error(
+                    ("Attention weights were not returned for the encoder. "
+                    "To enable, set output_attentions=True in the forward pass of the model. ")
+                )
+                return output
+            attn.requires_grad_(True)
+            attn.retain_grad()
+            model.enc_attn_weights.append(attn)
             return output
 
-        output[1].requires_grad_(True)
-        output[1].retain_grad()
-        model.enc_attn_weights_vit.append(output[1])
-        return output
+        hooks_pre_encoder, hooks_encoder = [], []
+        for layer in model.language_model.model.layers:
+            hook_encoder_layer = layer.self_attn.register_forward_hook(forward_hook)
+            hooks_pre_encoder.append(hook_encoder_layer)
 
-    hooks_pre_encoder_vit = []
-    for layer in model.vision_tower.vision_model.encoder.layers:
-        hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
-        hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
+        # Register vision tower hooks to capture vision attentions (for relevancy), when available.
+        model.enc_attn_weights_vit = []
+
+        def forward_hook_image_processor(module, inputs, output): 
+            if isinstance(output, tuple) and len(output) > 1:
+                attn = output[1]
+            else:
+                attn = None
+            if attn is None:
+                logger.warning(
+                    ("Attention weights were not returned for the vision model. "
+                     "Relevancy maps will not be calculated for the vision model. " 
+                     "To enable, set output_attentions=True in the forward pass of vision_tower. ")
+                )
+                return output
+            attn.requires_grad_(True)
+            attn.retain_grad()
+            model.enc_attn_weights_vit.append(attn)
+            return output
+
+        hooks_pre_encoder_vit = []
+        if hasattr(model, 'vision_tower') and hasattr(model.vision_tower, 'vision_model'):
+            for layer in model.vision_tower.vision_model.encoder.layers:
+                hook_encoder_layer_vit = layer.self_attn.register_forward_hook(forward_hook_image_processor)
+                hooks_pre_encoder_vit.append(hook_encoder_layer_vit)
+    else:
+        setattr(model, 'enc_attn_weights_vit', [])
     
     return processor, model
 

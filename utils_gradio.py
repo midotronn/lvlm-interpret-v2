@@ -36,8 +36,6 @@ model = None
 
 system_prompt = """You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
 If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
-# system_prompt = ""
-# system_prompt ="""A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."""
 
 title_markdown = ("""
 # LVLM-Interpret: An Interpretability Tool for Large Vision-Language Models
@@ -88,7 +86,6 @@ def add_text(state, text, image, image_process_mode):
     logger.info(text)
 
     prompt_len = 0
-    # prompt=f"[INST] {system_prompt} [/INST]\n\n" if system_prompt else ""
     if processor.tokenizer.chat_template is not None:
         prompt = processor.tokenizer.apply_chat_template(
             [{"role": "user", "content": "<image>\n" + text}],
@@ -100,7 +97,7 @@ def add_text(state, text, image, image_process_mode):
         prompt = system_prompt
         prompt_len += len(prompt)
         if image is not None:
-            msg = f"\n{ROLE0}: <image>\n{text}\n{ROLE1}:" # Ignore <image> token when calculating prompt length\     
+            msg = f"\n{ROLE0}: <image>\n{text}\n{ROLE1}:" 
         else:
             msg = f"\n{ROLE0}: {text}\n{ROLE1}: "
         prompt += msg
@@ -124,16 +121,23 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
     
     inputs = processor(prompt, image, return_tensors="pt").to(model.device)
     input_ids = inputs.input_ids
-    img_idx = torch.where(input_ids==model.config.image_token_index)[1][0].item()
+    
+    # Support both standard LVLM (with image token index) and OpenVLA-style models without explicit image token index.
+    is_openvla = getattr(model, 'is_openvla', False)
+    if not is_openvla and hasattr(model, 'config') and hasattr(model.config, 'image_token_index'):
+        img_idx = torch.where(input_ids==model.config.image_token_index)[1][0].item()
+    else:
+        img_idx = None
     do_sample = True if temperature > 0.001 else False
-    # Generate
+    # Reset attention holders for this generation run.
     model.enc_attn_weights = []
     model.enc_attn_weights_vit = []
 
-    if model.language_model.config.model_type == "gemma":
+    # Choose proper EOS depending on backend (e.g., Gemma chat templates).
+    if hasattr(model, 'language_model') and hasattr(model.language_model, 'config') and getattr(model.language_model.config, 'model_type', None) == "gemma":
         eos_token_id = processor.tokenizer('<end_of_turn>', add_special_tokens=False).input_ids[0]
     else:
-        eos_token_id = processor.tokenizer.eos_token_id
+        eos_token_id = getattr(processor.tokenizer, 'eos_token_id', None)
 
     outputs = model.generate(
             **inputs, 
@@ -148,18 +152,22 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
             eos_token_id=eos_token_id
         )
 
-    input_ids_list = input_ids.reshape(-1).tolist()
-    input_ids_list[img_idx] = 0
-    input_text = processor.tokenizer.decode(input_ids_list) # eg. "<s> You are a helpful ..."
-    if input_text.startswith("<s> "):
-        input_text = '<s>' + input_text[4:] # Remove the first space after <s> to maintain correct length
-    input_text_tokenized = processor.tokenizer.tokenize(input_text) # eg. ['<s>', '▁You', '▁are', '▁a', '▁helpful', ... ]
-    input_text_tokenized[img_idx] = "average_image"
+    # Build tokenized prompt for relevancy analysis when available.
+    input_text_tokenized = []
+    if not is_openvla and img_idx is not None:
+        input_ids_list = input_ids.reshape(-1).tolist()
+        input_ids_list[img_idx] = 0
+        input_text = processor.tokenizer.decode(input_ids_list)
+        if input_text.startswith("<s> "):
+            input_text = '<s>' + input_text[4:]
+        input_text_tokenized = processor.tokenizer.tokenize(input_text)
+        if img_idx < len(input_text_tokenized):
+            input_text_tokenized[img_idx] = "average_image"
     
     output_ids = outputs.sequences.reshape(-1)[input_ids.shape[-1]:].tolist()  
 
     generated_text = processor.tokenizer.decode(output_ids)
-    output_ids_decoded = [processor.tokenizer.decode(oid).strip() for oid in output_ids] # eg. ['The', 'man', "'", 's', 'sh', 'irt', 'is', 'yellow', '.', '</s>']
+    output_ids_decoded = [processor.tokenizer.decode(oid).strip() for oid in output_ids]
     generated_text_tokenized = processor.tokenizer.tokenize(generated_text)
 
     logger.info(f"Generated response: {generated_text}")
@@ -172,43 +180,75 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
     tempfilename = tempfile.NamedTemporaryFile(dir=tempdir)
     tempfilename.close()
 
-    # Save input_ids and attentions
+    # Save input_ids and any attentions available from different backends (decoder vs cross-attn).
     fn_input_ids = f'{tempfilename.name}_input_ids.pt'
     torch.save(move_to_device(input_ids, device='cpu'), fn_input_ids)
-    fn_attention = f'{tempfilename.name}_attn.pt'
-    torch.save(move_to_device(outputs.attentions, device='cpu'), fn_attention)
-    logger.info(f"Saved attention to {fn_attention}")
+    attn_obj = getattr(outputs, 'attentions', None)
+    if attn_obj is None:
+        attn_obj = getattr(outputs, 'decoder_attentions', None)
+    if attn_obj is not None:
+        fn_attention = f'{tempfilename.name}_attn.pt'
+        torch.save(move_to_device(attn_obj, device='cpu'), fn_attention)
+        logger.info(f"Saved attention to {fn_attention}")
+    cross_attn_obj = getattr(outputs, 'cross_attentions', None)
+    if cross_attn_obj is not None:
+        fn_xattention = f'{tempfilename.name}_xattn.pt'
+        torch.save(move_to_device(cross_attn_obj, device='cpu'), fn_xattention)
+        logger.info(f"Saved cross-attention to {fn_xattention}")
 
-    # Handle relevancy map
-    # tokens_for_rel = tokens_for_rel[1:]
-    word_rel_map = construct_relevancy_map(
-        tokenizer=processor.tokenizer, 
-        model=model,
-        input_ids=inputs.input_ids,
-        tokens=generated_text_tokenized, 
-        outputs=outputs, 
-        output_ids=output_ids,
-        img_idx=img_idx
-    )
-    fn_relevancy = f'{tempfilename.name}_relevancy.pt'
-    torch.save(move_to_device(word_rel_map, device='cpu'), fn_relevancy)
-    logger.info(f"Saved relevancy map to {fn_relevancy}")
+    # Compute relevancy only for standard LVLM models; OpenVLA path may not support it directly.
+    if not is_openvla:
+        word_rel_map = construct_relevancy_map(
+            tokenizer=processor.tokenizer, 
+            model=model,
+            input_ids=inputs.input_ids,
+            tokens=generated_text_tokenized, 
+            outputs=outputs, 
+            output_ids=output_ids,
+            img_idx=img_idx
+        )
+        fn_relevancy = f'{tempfilename.name}_relevancy.pt'
+        torch.save(move_to_device(word_rel_map, device='cpu'), fn_relevancy)
+        logger.info(f"Saved relevancy map to {fn_relevancy}")
     model.enc_attn_weights = []
-    model.enc_attn_weights_vit = []
-    # enc_attn_weights_vit = []
-    # rel_maps = []
+    if hasattr(model, 'enc_attn_weights_vit'):
+        model.enc_attn_weights_vit = []
 
-    # Reconstruct processed image
-    img_std = torch.tensor(processor.image_processor.image_std).view(3,1,1)
-    img_mean = torch.tensor(processor.image_processor.image_mean).view(3,1,1)
-    img_recover = inputs.pixel_values[0].cpu() * img_std + img_mean
-    img_recover = to_pil_image(img_recover)
+    # Recover a displayable image robustly across processors; fall back to original when needed.
+    try:
+        img_std = torch.tensor(processor.image_processor.image_std).view(3,1,1)
+        img_mean = torch.tensor(processor.image_processor.image_mean).view(3,1,1)
+        img_recover = inputs.pixel_values[0].cpu() * img_std + img_mean
+        img_recover = to_pil_image(img_recover)
+    except Exception:
+        img_recover = state.image if isinstance(state.image, Image.Image) else image
 
     state.recovered_image = img_recover
     state.input_text_tokenized = input_text_tokenized
     state.output_ids_decoded = output_ids_decoded 
     state.attention_key = tempfilename.name
     state.image_idx = img_idx
+    
+    # Persist OpenVLA flags and derived grid layout info for cross-attn visualization.
+    state.is_openvla = is_openvla
+    if is_openvla and cross_attn_obj is not None:
+        try:
+            kv_len = cross_attn_obj[0][0].shape[-1]
+            import math
+            g = int(math.sqrt(kv_len))
+            ignore_first = 0
+            if g * g != kv_len and (kv_len - 1) > 0:
+                g2 = int(math.sqrt(kv_len - 1))
+                if g2 * g2 == (kv_len - 1):
+                    g = g2
+                    ignore_first = 1
+            state.enc_grid_rows = g
+            state.enc_grid_cols = g
+            state.enc_kv_ignore_first = ignore_first
+        except Exception:
+            state.enc_grid_rows = 24
+            state.enc_grid_cols = 24
+            state.enc_kv_ignore_first = 0
 
     return state, to_gradio_chatbot(state) 
 
@@ -241,7 +281,7 @@ def build_demo(args, embed_mode=False):
                     
                     imagebox = gr.ImageEditor(type="pil", height=400, elem_id="image_canvas")
                     
-
+                    
                     with gr.Accordion("Parameters", open=False) as parameter_row:
                         image_process_mode = gr.Radio(
                             ["Crop", "Resize", "Pad", "Default"],
@@ -263,26 +303,9 @@ def build_demo(args, embed_mode=False):
                     with gr.Row(elem_id="buttons") as button_row:
                         clear_btn = gr.Button(value="🗑️  Clear", interactive=True, visible=True)
 
-            # with gr.Row():
-            #     with gr.Column(scale=6):
-                    
-            #         gr.Examples(examples=[
-            #             [f"{CUR_DIR}/examples/extreme_ironing.jpg", "What color is the man's shirt?"],
-            #             [f"{CUR_DIR}/examples/waterview.jpg", "What is in the top left of this image?"],
-            #             [f"{CUR_DIR}/examples/MMVP_34.jpg", "Is the butterfly's abdomen visible in the image?"],
-            #         ], inputs=[imagebox, textbox])
-
-            #     with gr.Column(scale=6):
-            #         gr.Examples(examples=[
-            #             [f"{CUR_DIR}/examples/MMVP_84.jpg", "Is the door of the truck cab open?"],
-            #             [f"{CUR_DIR}/examples/MMVP_173.jpg", "Is the decoration on the Easter egg flat or raised?"],
-            #             [f"{CUR_DIR}/examples/MMVP_279.jpg", "Is the elderly person standing or sitting in the picture?"],
-            #         ], inputs=[imagebox, textbox])
-
         with gr.Tab("Attention analysis"):
             with gr.Row():
                 with gr.Column(scale=3):
-                    # attn_ana_layer = gr.Slider(1, 100, step=1, label="Layer")
                     attn_modality_select = gr.Dropdown(
                             choices=['Image-to-Answer', 'Question-to-Answer'],
                             value='Image-to-Answer',
@@ -353,7 +376,7 @@ def build_demo(args, embed_mode=False):
             [state, attn_ana_plot_2, t2i_attn_head_mean_plot]
         )
         
-
+        
         attn_submit.click(
             handle_attentions_i2t,
             [state, generated_text, attn_select_layer],
@@ -374,7 +397,6 @@ def build_demo(args, embed_mode=False):
                 relevancy_gallery = gr.Gallery(type="pil", label='Input image relevancy heatmaps', columns=8, interactive=False)
             with gr.Row():
                 relevancy_txt_gallery = gr.Gallery(type="pil", label='Image-text relevancy comparison', columns=8, interactive=False)
-                #gr.Plot(label='Input text Relevancy heatmaps') 
             with gr.Row():
                 relevancy_highlightedtext = gr.HighlightedText(
                         label='Tokens with high relevancy to image'
@@ -382,7 +404,6 @@ def build_demo(args, embed_mode=False):
 
         relevancy_submit.click(
             lambda state, relevancy_token_dropdown: handle_relevancy(state, relevancy_token_dropdown, incude_text_relevancy=True),
-            #handle_relevancy,
             [state, relevancy_token_dropdown],
             [relevancy_gallery],
         )
@@ -413,15 +434,11 @@ def build_demo(args, embed_mode=False):
                 with gr.Accordion("Hyper Parameters", open=False) as causal_parameters_row:
                         with gr.Row():
                             with gr.Column(scale=2):
-                                # search_rad_slider= gr.Slider(1, 5, step=1, value=3, label="Search Radius", 
-                                #                              info="The maximal distance on the graph from the explained token.",)
                                 att_th_slider = gr.Slider(minimum=0.0001, maximum=1-0.0001, value=0.005, step=0.0001, interactive=True, label="Raw Attention Threshold",
                                                           info="A threshold for selecting tokens to be graph nodes.",)
                             with gr.Column(scale=2):
                                 alpha_slider = gr.Slider(minimum=1e-7, maximum=1e-2, value=1e-5, step=1e-7, interactive=True, label="Statistical Test Threshold (alpha)",
                                                          info="A threshold for the statistical test of conditional independence.",)
-                                # dof_slider = gr.Slider(minimum=32, maximum=1024, value=128, step=1, interactive=True, label="Degrees of Freedom",
-                                #                        info="Degrees of freedom of correlation matrix.")
             with gr.Row(visible=enable_causality):
                 pds_plot = gr.Image(type="pil", label='Preprocessed image')
                 causal_head_gallery = gr.Gallery(type="pil", label='Causal Head Graph', columns=8, interactive=False)
@@ -471,27 +488,6 @@ def build_demo(args, embed_mode=False):
             [state],
             [state, causality_dropdown]
         )
-        # .then(
-        #     handle_box_reset, 
-        #     [imagebox_recover,box_states], 
-        #     [imagebox_recover_boxable, box_states]
-        # ).then(
-        #     handle_attentions_i2t,
-        #     [state, generated_text, attn_select_layer],
-        #     [generated_text, imagebox_recover, i2t_attn_gallery, i2t_attn_head_mean_plot]
-        # ).then(
-        #     clear_canvas,
-        #     [],
-        #     [imagebox]
-        # ).then(
-        #     handle_relevancy,
-        #     [state, relevancy_token_dropdown],
-        #     [relevancy_gallery]
-        # ).then(
-        #     handle_text_relevancy,
-        #     [state, relevancy_token_dropdown],
-        #     [relevancy_txt_gallery, relevancy_highlightedtext]
-        # )
         submit_btn.click(
             add_text,
             [state, textbox, imagebox, image_process_mode],
@@ -510,28 +506,8 @@ def build_demo(args, embed_mode=False):
             [state],
             [state, causality_dropdown]
         )
-        # .then(
-        #     causality_update_dropdown,
-        #     [state],
-        #     [causality_dropdown]
-        # ).then(
-        #     handle_box_reset, 
-        #     [imagebox_recover,box_states], 
-        #     [imagebox_recover_boxable, box_states]
-        # ).then(
-        #      plot_attention_analysis,
-        #      [state, attn_modality_select],
-        #      [state, attn_ana_plot]
-        # ).then(
-        #     handle_relevancy,
-        #     [state, relevancy_token_dropdown],
-        #     [relevancy_gallery]
-        # ).then(
-        #     handle_text_relevancy,
-        #     [state, relevancy_token_dropdown],
-        #     [relevancy_txt_gallery, relevancy_highlightedtext]
-        # )
         
 
     return demo
 
+ 

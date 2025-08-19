@@ -34,7 +34,7 @@ def get_expla_set_per_rad(pds_tree):
 
 
 
-def get_relevant_image_tokens(class_token, attention_matrix, first_token, num_top_k_tokens) -> list:
+def get_relevant_image_tokens(class_token, attention_matrix, first_token, num_top_k_tokens, num_image_tokens: int = 576) -> list:
     """
     Find the indexes of the image tokens for which the class tokens most attend (highest attention)
 
@@ -43,9 +43,9 @@ def get_relevant_image_tokens(class_token, attention_matrix, first_token, num_to
     :param first_token:
     :param num_top_k_tokens:
     """
-    weights = attention_matrix[class_token, first_token:(first_token+576)]
+    weights = attention_matrix[class_token, first_token:(first_token+num_image_tokens)]
     sorting_indexes = np.argsort(weights)[::-1]  # descending sorting indexes
-    all_indexes = list(range(576))
+    all_indexes = list(range(num_image_tokens))
     top_k_idx = [all_indexes[sorting_indexes[i]] for i in range(num_top_k_tokens)]
     top_k_idx = [t + first_token for t in top_k_idx]  # add index offset
     return top_k_idx
@@ -57,14 +57,14 @@ def get_relevant_prompt_tokens(class_token, attention_matrix, att_th, first_imag
     return list(relevent_prompt_tokens)
 
 
-def get_relevant_text_tokens(class_token, attention_matrix, att_th, first_image_token) -> list:
+def get_relevant_text_tokens(class_token, attention_matrix, att_th, first_image_token, num_image_tokens: int = 576) -> list:
     """
     Get the indexes of the text tokens after the image (not including the prompt)
     for which the class tokens highly attends (attention above the threshold)
     """
-    weights = attention_matrix[class_token, (first_image_token+576):class_token]
+    weights = attention_matrix[class_token, (first_image_token+num_image_tokens):class_token]
     idxs = np.where(weights > att_th)[0]
-    relevent_gen_tokens = [t + (first_image_token+576) for t in idxs]
+    relevent_gen_tokens = [t + (first_image_token+num_image_tokens) for t in idxs]
     return relevent_gen_tokens
 
 
@@ -129,18 +129,18 @@ def copy_sub_graph(full_graph: PAG, nodes_of_interest: set) -> PAG:
 #     return to_pil_image(img_recover)
 
 
-def show_tokens_on_image(selected_image_tokens, pil_image, weights=None):
+def show_tokens_on_image(selected_image_tokens, pil_image, weights=None, n_x_tokens: int = 24, n_y_tokens: int = 24):
     if weights is None or len(weights)==0:
         weights_n = [0.7] * len(selected_image_tokens)
     else:
         mx = 1  # max(weights)
         weights_n = [v/mx for v in weights]
 
-    tokens_mask = np.zeros(576)
+    tokens_mask = np.zeros(n_x_tokens * n_y_tokens)
     for i, tok in enumerate(selected_image_tokens):
         tokens_mask[tok] = weights_n[i]
     cmap = plt.get_cmap('jet')
-    im_mask = tokens_mask.reshape((24, 24))
+    im_mask = tokens_mask.reshape((n_x_tokens, n_y_tokens))
     im_mask = cmap(im_mask)
     a_im = Image.fromarray((im_mask[:, :, :3] * 255).astype(np.uint8)).resize((336, 336), Image.BICUBIC)
     a_im.putalpha(128)

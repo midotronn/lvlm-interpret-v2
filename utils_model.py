@@ -56,6 +56,32 @@ def get_processor_model(args):
             trust_remote_code=True
         )
         setattr(model, 'is_openvla', True)
+        # Add container for cross-attention weights to enable Grad-CAM style relevancy
+        setattr(model, 'enc_attn_weights_xattn', [])
+        # Register hooks on decoder cross-attention modules to capture attention weights with gradients
+        def xattn_forward_hook(module, inputs, output):
+            attn = None
+            if isinstance(output, tuple) and len(output) > 1:
+                attn = output[1]
+            if attn is not None:
+                try:
+                    attn.requires_grad_(True)
+                    attn.retain_grad()
+                    model.enc_attn_weights_xattn.append(attn)
+                except Exception:
+                    pass
+            return output
+        try:
+            for name, m in model.named_modules():
+                lname = name.lower()
+                if ('cross' in lname or 'encoder_attn' in lname) and ('vision' not in lname):
+                    try:
+                        m.register_forward_hook(xattn_forward_hook)
+                    except Exception:
+                        pass
+        except Exception:
+            # Fallback: if model structure is unexpected, skip hooks gracefully
+            pass
     else:
         model = LlavaForConditionalGeneration.from_pretrained(
             args.model_name_or_path, torch_dtype=torch.bfloat16, 

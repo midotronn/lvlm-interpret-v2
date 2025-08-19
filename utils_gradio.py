@@ -18,7 +18,7 @@ from utils_attn import (
     plot_text_to_image_analysis, handle_box_reset, boxes_click_handler, attn_update_slider
 )
 
-from utils_relevancy import construct_relevancy_map
+from utils_relevancy import construct_relevancy_map, construct_relevancy_map_openvla
 
 from utils_causal_discovery import (
     handle_causality, handle_causal_head, causality_update_dropdown
@@ -210,6 +210,24 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
         fn_relevancy = f'{tempfilename.name}_relevancy.pt'
         torch.save(move_to_device(word_rel_map, device='cpu'), fn_relevancy)
         logger.info(f"Saved relevancy map to {fn_relevancy}")
+    else:
+        # For OpenVLA, compute relevancy from cross-attention over encoder keys
+        try:
+            state.image_idx = 0 if img_idx is None else img_idx
+            rel_map_openvla = construct_relevancy_map_openvla(
+                tokenizer=processor.tokenizer,
+                model=model,
+                outputs=outputs,
+                tokens=generated_text_tokenized,
+                enc_grid_rows=getattr(state, 'enc_grid_rows', 24) or 24,
+                enc_grid_cols=getattr(state, 'enc_grid_cols', 24) or 24,
+                apply_normalization=True
+            )
+            fn_relevancy = f'{tempfilename.name}_relevancy.pt'
+            torch.save(move_to_device(rel_map_openvla, device='cpu'), fn_relevancy)
+            logger.info(f"Saved OpenVLA relevancy map to {fn_relevancy}")
+        except Exception as e:
+            logger.warning(f"OpenVLA relevancy map failed: {e}")
     model.enc_attn_weights = []
     if hasattr(model, 'enc_attn_weights_vit'):
         model.enc_attn_weights_vit = []

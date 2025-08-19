@@ -132,7 +132,8 @@ def handle_attentions_i2t(state, highlighted_text, layer_idx=32, token_idx=0):
     if not os.path.exists(fn_attention):
         gr.Error('Attention file not found. Please re-run query.')
     else:
-        attentions = torch.load(fn_attention)
+        # Torch 2.6 sets weights_only=True by default; disable for lists-of-tensors
+        attentions = torch.load(fn_attention, weights_only=False)
         logger.info(f'Loaded attention from {fn_attention}')
         if len(attentions) == len(state.output_ids_decoded):
             gr.Error('Mismatch between lengths of attentions and output tokens')
@@ -438,7 +439,7 @@ def plot_attention_analysis(state, attn_modality_select):
     is_openvla = getattr(state, 'is_openvla', False)
 
     if os.path.exists(fn_attention):
-        attentions = torch.load(fn_attention)
+        attentions = torch.load(fn_attention, weights_only=False)
         logger.info(f'Loaded attention from {fn_attention}')
         if len(attentions) == len(state.output_ids_decoded):
             gr.Error('Mismatch between lengths of attentions and output tokens')

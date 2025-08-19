@@ -121,30 +121,82 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
     # ---***------***------***------***------***------***------***------***------***------***------***------***---
     # ---***--- Load attention matrix ---***---
     fn_attention = state.attention_key + '_attn.pt'
+    fn_xattention = state.attention_key + '_xattn.pt'
     recovered_image = state.recovered_image
     first_im_token_idx = state.image_idx
     generated_text = state.output_ids_decoded
 
-    if not os.path.exists(fn_attention):
+    is_openvla = getattr(state, 'is_openvla', False)
+    if not os.path.exists(fn_attention) and (not (is_openvla and os.path.exists(fn_xattention))):
         gr.Error('Attention file not found. Please re-run query.')
     else:
-        attentions = torch.load(fn_attention)  # attentions is a tuple of length as the number of generated tokens.
+        # Torch 2.6 default weights_only=True breaks list-of-tensors; disable it
+        attentions = torch.load(fn_attention, weights_only=False) if os.path.exists(fn_attention) else None
 
-    last_mh_attention = attentions[-1][-1]  # last generated token, last layer
-    num_heads, _, attention_len = last_mh_attention[-1].shape
-    full_attention = np.zeros((num_heads, attention_len, attention_len))
+    if not is_openvla:
+        last_mh_attention = attentions[-1][-1]
+        num_heads, _, attention_len = last_mh_attention[-1].shape
+        full_attention = np.zeros((num_heads, attention_len, attention_len))
 
-    last_mh_attention = attentions[0][-1]  # last layer's attention matrices before output generation
-    attention_vals = last_mh_attention[0].detach().cpu().numpy()  # 0 is the index for the sample in the batch.
-    d1 = attention_vals.shape[-1]
-    full_attention[:, :d1, :d1] = attention_vals
+        last_mh_attention = attentions[0][-1]
+        attention_vals = last_mh_attention[0].detach().cpu().numpy()
+        d1 = attention_vals.shape[-1]
+        full_attention[:, :d1, :d1] = attention_vals
 
     # create one full attention matrix that includes attention to generated tokens
-    for gen_idx in range(1, len(generated_text)):
-        last_mh_attention = attentions[gen_idx][-1]
-        att_np = last_mh_attention[0].detach().cpu().numpy()
-        full_attention[:, d1, :att_np.shape[-1]] = att_np[:,0,:]
-        d1 += 1
+        for gen_idx in range(1, len(generated_text)):
+            last_mh_attention = attentions[gen_idx][-1]
+            att_np = last_mh_attention[0].detach().cpu().numpy()
+            full_attention[:, d1, :att_np.shape[-1]] = att_np[:,0,:]
+            d1 += 1
+
+    # OpenVLA: build a square matrix combining cross-attn (text->image) and decoder self-attn (text->text)
+    if is_openvla:
+        xattn = torch.load(fn_xattention, weights_only=False) if os.path.exists(fn_xattention) else None
+        if xattn is None:
+            return []
+        g_rows = getattr(state, 'enc_grid_rows', 24) or 24
+        g_cols = getattr(state, 'enc_grid_cols', 24) or 24
+        ignore_first = getattr(state, 'enc_kv_ignore_first', 0)
+        N_img = g_rows * g_cols
+        N_txt = len(generated_text)
+        N = N_img + N_txt
+        # Use the last layer
+        # Determine heads from first token
+        first_tok_last = xattn[0][-1].squeeze()  # [H,Q,K] or [H,K]
+        if first_tok_last.dim() == 1:
+            first_tok_last = first_tok_last.unsqueeze(0)
+        if first_tok_last.dim() == 3:
+            first_tok_last = first_tok_last[:, -1, :]
+        num_heads = first_tok_last.shape[0]
+        full_attention = np.zeros((num_heads, N, N))
+        # Bottom-left: text->image from cross-attn
+        for t in range(N_txt):
+            mh = xattn[t][-1].squeeze()
+            if mh.dim() == 3:
+                mh = mh[:, -1, :]
+            # slice K to grid window
+            kv = mh[:, ignore_first:ignore_first + N_img]
+            kv = kv[:, :N_img]
+            full_attention[:, N_img + t, :N_img] = kv.detach().cpu().numpy()
+        # Bottom-right: text->text from decoder self-attn if available, else small identity
+        if attentions is not None:
+            dec_last = attentions[0][-1].squeeze()  # [H,Q,K]
+            if dec_last.dim() == 2:
+                dec_last = dec_last.unsqueeze(1)
+            Q, K = dec_last.shape[-2], dec_last.shape[-1]
+            q_start = max(0, Q - N_txt)
+            k_start = max(0, K - N_txt)
+            for h in range(num_heads):
+                block = dec_last[h, q_start:, k_start:].detach().cpu().numpy()
+                Hq, Hk = block.shape
+                full_attention[h, N_img:N_img+Hq, N_img:N_img+Hk] = block
+        else:
+            for h in range(num_heads):
+                full_attention[h, N_img:N, N_img:N] = np.eye(N_txt) * 1e-3
+        # Top-left: image->image unknown; set weak identity
+        for h in range(num_heads):
+            full_attention[h, :N_img, :N_img] = np.eye(N_img) * 1e-6
 
     # Sizes:
     # Number of heads: {num_heads}, attention size: {attention_len}x{attention_len}

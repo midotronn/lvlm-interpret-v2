@@ -315,3 +315,54 @@ def construct_relevancy_map(tokenizer, model, input_ids, tokens, outputs, output
     }
 
     return word_rel_maps
+
+
+def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_rows, enc_grid_cols, apply_normalization=True, progress=gr.Progress(track_tqdm=True)):
+    """Construct per-token relevancy maps for OpenVLA/ECoT models using cross-attention.
+
+    This mirrors the LLAVA relevancy computation but operates on decoder cross-attention
+    over encoder keys. If gradient-enabled attention tensors are available (via hooks),
+    it applies Grad-CAM (rule 5) per head before aggregating.
+    """
+    xatts = getattr(outputs, 'cross_attentions', None)
+    if xatts is None:
+        logger.warning('No cross_attentions found on outputs; skipping OpenVLA relevancy')
+        return {"vit": {}, "all": {}}
+
+    # Hooks may have collected gradient-enabled tensors; may be fewer/more than exact mapping
+    grad_tensors = getattr(model, 'enc_attn_weights_xattn', [])
+
+    word_rel_maps_vit = {}
+    T = len(tokens)
+    for t in tqdm(range(T), desc="Building OpenVLA relevancy maps"):
+        per_layer = []
+        layers = xatts[t]
+        for l, att in enumerate(layers):
+            # att: [B, H, Q, K]; take last query position
+            if att is None:
+                continue
+            A = att[:, :, -1, :]  # [B,H,K]
+            if l < len(grad_tensors) and grad_tensors[l] is not None and getattr(grad_tensors[l], 'grad', None) is not None:
+                try:
+                    G = grad_tensors[l].grad[:, :, -1, :]
+                    cam = (G.clamp(min=0) * A).mean(dim=1)  # [B,K]
+                except Exception:
+                    cam = A.mean(dim=1)
+            else:
+                cam = A.mean(dim=1)
+            v = cam[0]  # [K]
+            # Normalize and reshape to grid
+            v = (v - v.min()) / (v.max() - v.min() + 1e-12)
+            want = enc_grid_rows * enc_grid_cols
+            K = v.shape[-1]
+            if K >= want:
+                v = v[:want]
+            else:
+                v = F.pad(v, (0, want - K), "constant", 0)
+            per_layer.append(v.view(enc_grid_rows, enc_grid_cols))
+        if not per_layer:
+            continue
+        rel = torch.stack(per_layer, dim=0).mean(dim=0)
+        word_rel_maps_vit[tokens[t]] = rel
+
+    return {"vit": word_rel_maps_vit, "all": word_rel_maps_vit}

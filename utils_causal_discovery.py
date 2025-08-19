@@ -227,6 +227,12 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
     if att_th_ext is not None:
         att_th = att_th_ext
 
+    # Derive consistent indexing helpers for both backends
+    g_rows = getattr(state, 'enc_grid_rows', 24) or 24
+    g_cols = getattr(state, 'enc_grid_cols', 24) or 24
+    N_img_local = (g_rows * g_cols) if is_openvla else 576
+    first_im_token_idx = 0 if is_openvla else state.image_idx
+
     heads_to_analyse = list(range(num_heads))
     if not is_openvla:
         token_to_explain = attention_len - len(generated_text) + int(token_to_explain.split('_')[0])

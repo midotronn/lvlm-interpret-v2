@@ -104,6 +104,8 @@ def handle_causal_head(state, explainers_data, head_selection, class_token_txt):
     
     nodes_set = set(expla_list)
     nodes_set.add(token_to_explain)
+    # Coerce labels to safe types (stringify unexpected objects)
+    node_labels = {k: (v if isinstance(v, (str, int, Image.Image)) else str(v)) for k, v in node_labels.items()}
     fig = draw_pds_tree(explainer.results[token_to_explain]['pds_tree'], explainer.graph, node_labels=node_labels,
                         node_size_factor=1.4)
     if fig is None:
@@ -483,6 +485,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         else:
             idx = token_to_explain - N_img_local
         node_labels[token_to_explain] = generated_text[idx]
+        # Coerce labels to safe types
+        node_labels = {k: (v if isinstance(v, (str, int, Image.Image)) else str(v)) for k, v in node_labels.items()}
         
         nodes_set = set(expla_list)
         nodes_set.add(token_to_explain)

@@ -56,6 +56,12 @@ def get_processor_model(args):
             trust_remote_code=True
         )
         setattr(model, 'is_openvla', True)
+        # Ensure attentions are returned during generation for OpenVLA models
+        try:
+            if hasattr(model, 'config'):
+                model.config.output_attentions = True
+        except Exception:
+            pass
         # Add container for cross-attention weights to enable Grad-CAM style relevancy
         setattr(model, 'enc_attn_weights_xattn', [])
         # Register hooks on decoder cross-attention modules to capture attention weights with gradients

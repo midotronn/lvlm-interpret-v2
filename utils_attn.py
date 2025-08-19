@@ -284,6 +284,7 @@ def handle_relevancy(state, type_selector,incude_text_relevancy=False):
     fn_attention = state.attention_key + '_relevancy.pt'
     recovered_image = state.recovered_image
     img_idx = state.image_idx
+    is_openvla = getattr(state, 'is_openvla', False)
 
     word_rel_maps = torch.load(fn_attention)
     if type_selector not in word_rel_maps:
@@ -296,6 +297,16 @@ def handle_relevancy(state, type_selector,incude_text_relevancy=False):
     for rel_key, rel_map in word_rel_map.items():
         i+=1
         if rel_key in separators_list:
+            continue
+        # OpenVLA path: relevancy maps are already 2D grids over encoder keys (image patches).
+        if is_openvla:
+            if isinstance(rel_map, torch.Tensor):
+                rel_np = rel_map.float().cpu().numpy()
+            else:
+                rel_np = np.array(rel_map)
+            rel_img = draw_heatmap_on_image(rel_np, recovered_image, normalize=True)
+            rel_key = rel_key.strip('▁').strip('_')
+            image_list.append((rel_img, rel_key))
             continue
         if (rel_map.shape[-1] != 577) and img_idx:
             if not incude_text_relevancy:

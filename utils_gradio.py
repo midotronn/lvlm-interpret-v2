@@ -132,6 +132,8 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
     # Reset attention holders for this generation run.
     model.enc_attn_weights = []
     model.enc_attn_weights_vit = []
+    if is_openvla and hasattr(model, 'enc_attn_weights_xattn'):
+        model.enc_attn_weights_xattn = []
 
     # Choose proper EOS depending on backend (e.g., Gemma chat templates).
     if hasattr(model, 'language_model') and hasattr(model.language_model, 'config') and getattr(model.language_model.config, 'model_type', None) == "gemma":
@@ -421,6 +423,12 @@ def build_demo(args, embed_mode=False):
                         label='Tokens with high relevancy to image'
                     )
 
+        def _relevancy_choices(state):
+            # Dynamically adjust relevancy mode options based on backend
+            if getattr(state, 'is_openvla', False):
+                return gr.Dropdown(choices=['vit','all'], value='vit', interactive=True, show_label=False, container=False)
+            return gr.Dropdown(choices=['llama','vit','all'], value='llama', interactive=True, show_label=False, container=False)
+
         relevancy_submit.click(
             lambda state, relevancy_token_dropdown: handle_relevancy(state, relevancy_token_dropdown, incude_text_relevancy=True),
             [state, relevancy_token_dropdown],
@@ -431,16 +439,14 @@ def build_demo(args, embed_mode=False):
             [state, relevancy_token_dropdown],
             [relevancy_txt_gallery, relevancy_highlightedtext]
         )
+        # After generation, update relevancy dropdown based on model type
+        def _post_gen_update_rel_mode(state):
+            return _relevancy_choices(state)
 
         enable_causality = False
         with gr.Tab("Causality"):
-            gr.Markdown(
-                """
-                ### *Coming soon*
-                """
-            )
             state_causal_explainers = gr.State()
-            with gr.Row(visible=enable_causality):
+            with gr.Row(visible=True):
                 causality_dropdown = gr.Dropdown(
                     choices=[],
                     interactive=True,
@@ -449,7 +455,7 @@ def build_demo(args, embed_mode=False):
                     scale=2,
                 )
                 causality_submit = gr.Button(value="Learn Causal Structures", interactive=True, variant='primary', scale=1)
-            with gr.Row(visible=enable_causality):
+            with gr.Row(visible=True):
                 with gr.Accordion("Hyper Parameters", open=False) as causal_parameters_row:
                         with gr.Row():
                             with gr.Column(scale=2):
@@ -458,13 +464,13 @@ def build_demo(args, embed_mode=False):
                             with gr.Column(scale=2):
                                 alpha_slider = gr.Slider(minimum=1e-7, maximum=1e-2, value=1e-5, step=1e-7, interactive=True, label="Statistical Test Threshold (alpha)",
                                                          info="A threshold for the statistical test of conditional independence.",)
-            with gr.Row(visible=enable_causality):
+            with gr.Row(visible=True):
                 pds_plot = gr.Image(type="pil", label='Preprocessed image')
                 causal_head_gallery = gr.Gallery(type="pil", label='Causal Head Graph', columns=8, interactive=False)
-            with gr.Row(visible=enable_causality):
+            with gr.Row(visible=True):
                 causal_head_slider = gr.Slider(minimum=0, maximum=31, value=1, step=1, interactive=True, label="Head Selection")
                 causal_head_submit = gr.Button(value="Plot Causal Head", interactive=True, scale=1)
-            with gr.Row(visible=enable_causality):
+            with gr.Row(visible=True):
                 causality_gallery = gr.Gallery(type="pil", label='Causal Heatmaps', columns=8, interactive=False)
     
         causal_head_submit.click(
@@ -506,6 +512,10 @@ def build_demo(args, embed_mode=False):
             causality_update_dropdown,
             [state],
             [state, causality_dropdown]
+        ).then(
+            _post_gen_update_rel_mode,
+            [state],
+            [relevancy_token_dropdown]
         )
         submit_btn.click(
             add_text,
@@ -524,6 +534,10 @@ def build_demo(args, embed_mode=False):
             causality_update_dropdown,
             [state],
             [state, causality_dropdown]
+        ).then(
+            _post_gen_update_rel_mode,
+            [state],
+            [relevancy_token_dropdown]
         )
         
 

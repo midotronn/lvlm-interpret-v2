@@ -99,7 +99,13 @@ def create_explanation(attention_matrix, tokens_idx_list, token_of_interest,
 
     runtimes = {'structure': None, 'reasoning': None}
     t0 = time.time()
-    structure_learner.learn_structure_global()
+    # Support both APIs: some learners expose learn_structure_global, others expose learn_structure
+    if hasattr(structure_learner, 'learn_structure_global'):
+        structure_learner.learn_structure_global()
+    elif hasattr(structure_learner, 'learn_structure'):
+        structure_learner.learn_structure()
+    else:
+        raise RuntimeError("Structure learner does not implement a learn method")
     t1 = time.time()
     runtimes['structure'] = t1-t0
     if verbose:

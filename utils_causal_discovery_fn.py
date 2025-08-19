@@ -161,7 +161,7 @@ def show_tokens_on_image(selected_image_tokens, pil_image, weights=None, n_x_tok
 
 def calculate_explanation_pvals(explainer_instance, target_node, max_range=None):
     if target_node not in explainer_instance.results:
-        raise "explainer should have initially been run."
+        raise RuntimeError("explainer should have initially been run.")
     if max_range is None:
         max_range = explainer_instance.results[target_node]['max_pds_tree_depth']
 

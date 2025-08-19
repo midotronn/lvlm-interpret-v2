@@ -317,7 +317,7 @@ def construct_relevancy_map(tokenizer, model, input_ids, tokens, outputs, output
     return word_rel_maps
 
 
-def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_rows, enc_grid_cols, apply_normalization=True, progress=gr.Progress(track_tqdm=True)):
+def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_rows, enc_grid_cols, apply_normalization=True, enc_kv_ignore_first: int = 0, progress=gr.Progress(track_tqdm=True)):
     """Construct per-token relevancy maps for OpenVLA/ECoT models using cross-attention.
 
     This mirrors the LLAVA relevancy computation but operates on decoder cross-attention
@@ -342,9 +342,14 @@ def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_
             if att is None:
                 continue
             A = att[:, :, -1, :]  # [B,H,K]
+            # Slice keys to ignore special tokens and match grid size
+            start = max(0, int(enc_kv_ignore_first))
+            want = enc_grid_rows * enc_grid_cols
+            A = A[..., start:start + want]
             if l < len(grad_tensors) and grad_tensors[l] is not None and getattr(grad_tensors[l], 'grad', None) is not None:
                 try:
                     G = grad_tensors[l].grad[:, :, -1, :]
+                    G = G[..., start:start + want]
                     cam = (G.clamp(min=0) * A).mean(dim=1)  # [B,K]
                 except Exception:
                     cam = A.mean(dim=1)
@@ -353,7 +358,6 @@ def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_
             v = cam[0]  # [K]
             # Normalize and reshape to grid
             v = (v - v.min()) / (v.max() - v.min() + 1e-12)
-            want = enc_grid_rows * enc_grid_cols
             K = v.shape[-1]
             if K >= want:
                 v = v[:want]

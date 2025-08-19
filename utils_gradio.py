@@ -221,7 +221,8 @@ def lvlm_bot(state, temperature, top_p, max_new_tokens):
                 tokens=generated_text_tokenized,
                 enc_grid_rows=getattr(state, 'enc_grid_rows', 24) or 24,
                 enc_grid_cols=getattr(state, 'enc_grid_cols', 24) or 24,
-                apply_normalization=True
+                apply_normalization=True,
+                enc_kv_ignore_first=getattr(state, 'enc_kv_ignore_first', 0)
             )
             fn_relevancy = f'{tempfilename.name}_relevancy.pt'
             torch.save(move_to_device(rel_map_openvla, device='cpu'), fn_relevancy)

@@ -109,7 +109,8 @@ def handle_causal_head(state, explainers_data, head_selection, class_token_txt):
     if fig is None:
         fig = plt.figure()
     fig.canvas.draw()
-    im_graph = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+    buf = fig.canvas.buffer_rgba()
+    im_graph = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
     plt.close()
 
     return im_heat_list, im_graph
@@ -414,7 +415,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         ax.axis([1, 32, -ymax*0.01, ymax])
         # ax.set_position([0, 0, 1, 1])
         fig.canvas.draw()
-        im_head_importance = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+        buf = fig.canvas.buffer_rgba()
+        im_head_importance = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
         plt.close()
 
         # attentnion values
@@ -427,7 +429,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         ax.bar(range(len(h)), h)
         ax.grid(True)
         fig.canvas.draw()
-        im_att_bar = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+        buf = fig.canvas.buffer_rgba()
+        im_att_bar = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
         plt.close()
 
         im_heat = create_im_tokens_marks(recovered_image, im_expla_rel_idx, txt=txt)
@@ -443,7 +446,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         ax.plot(head_importance, '.-')
         ax.grid(True)
         fig.canvas.draw()
-        im_pl = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+        buf = fig.canvas.buffer_rgba()
+        im_pl = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
         plt.close()
 
         nodes_set = set(expla_list)
@@ -459,7 +463,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         # subgraph = copy_sub_graph(text_expl.graph, nodes_set)
         # fig = draw_graph(subgraph, show=False, node_labels=node_labels)
         # fig.canvas.draw()
-        im_graph = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+        buf = fig.canvas.buffer_rgba()
+        im_graph = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
         # plt.close()
 
         node_labels = dict()
@@ -486,7 +491,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         if fig is None:
             fig = plt.figure()
         fig.canvas.draw()
-        im_graph = Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+        buf = fig.canvas.buffer_rgba()
+        im_graph = Image.frombytes('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1).convert('RGB')
         plt.close()
 
         gallery_image_list.append(im_heat)

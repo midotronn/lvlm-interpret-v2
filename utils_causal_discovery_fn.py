@@ -93,7 +93,8 @@ def create_explanation(attention_matrix, tokens_idx_list, token_of_interest,
     cond_indep_test = cleann_explainer.ci_test
     if LearnStructOrderedICD is None:
         raise RuntimeError("ICD learner is unavailable. Please ensure causal_discovery_algs is accessible.")
-    structure_learner = LearnStructOrderedICD(set(tokens_idx_list), sorted(tokens_idx_list), cond_indep_test,
+    # Correct argument order for ICD: (nodes_set, ci_test, ...)
+    structure_learner = LearnStructOrderedICD(set(tokens_idx_list), cond_indep_test,
                                               is_selection_bias=False)
 
     runtimes = {'structure': None, 'reasoning': None}

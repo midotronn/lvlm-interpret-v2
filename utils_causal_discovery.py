@@ -27,12 +27,12 @@ from utils_causal_discovery_fn import (
 )
 
 
-def create_im_tokens_marks(orig_img, tokens_to_mark, weights=None, txt=None, txt_pos=None):
+def create_im_tokens_marks(orig_img, tokens_to_mark, weights=None, txt=None, txt_pos=None, n_x_tokens: int = 24, n_y_tokens: int = 24):
     im_1 = orig_img.copy()
     if weights is not None:
-        im_heat = show_tokens_on_image(tokens_to_mark, im_1, weights)
+        im_heat = show_tokens_on_image(tokens_to_mark, im_1, weights, n_x_tokens=n_x_tokens, n_y_tokens=n_y_tokens)
     else:
-        im_heat = show_tokens_on_image(tokens_to_mark, im_1)
+        im_heat = show_tokens_on_image(tokens_to_mark, im_1, n_x_tokens=n_x_tokens, n_y_tokens=n_y_tokens)
     im_heat_edit = ImageDraw.Draw(im_heat)
     if isinstance(txt, str):
         if txt_pos is None:
@@ -50,7 +50,11 @@ def causality_update_dropdown(state):
 
 def handle_causal_head(state, explainers_data, head_selection, class_token_txt):
     recovered_image = state.recovered_image
-    first_im_token_idx = state.image_idx
+    is_openvla = getattr(state, 'is_openvla', False)
+    first_im_token_idx = 0 if is_openvla else state.image_idx
+    g_rows = getattr(state, 'enc_grid_rows', 24)
+    g_cols = getattr(state, 'enc_grid_cols', 24)
+    num_image_tokens = (g_rows * g_cols) if is_openvla else 576
 
     token_to_explain = explainers_data[0]
     head_id = head_selection
@@ -64,9 +68,9 @@ def handle_causal_head(state, explainers_data, head_selection, class_token_txt):
     im_tok_rel_idx = []
     for rad in range(1,max_depth+1):
         im_tok_rel_idx += [v-first_im_token_idx 
-                           for v in expla_set_per_rad[rad] if v >= first_im_token_idx and v < (first_im_token_idx+576)]
+                           for v in expla_set_per_rad[rad] if v >= first_im_token_idx and v < (first_im_token_idx+num_image_tokens)]
         im_heat_list.append(
-            create_im_tokens_marks(recovered_image, im_tok_rel_idx, txt='search radius: {rad}'.format(rad=rad))
+            create_im_tokens_marks(recovered_image, im_tok_rel_idx, txt='search radius: {rad}'.format(rad=rad), n_x_tokens=g_rows, n_y_tokens=g_cols)
         )
         
 
@@ -86,7 +90,7 @@ def handle_causal_head(state, explainers_data, head_selection, class_token_txt):
     node_labels = dict()
     for tok in expla_list:
         im_idx = tok - first_im_token_idx
-        if im_idx < 0 or im_idx >= 576:  # if token is not image
+        if im_idx < 0 or im_idx >= num_image_tokens:  # if token is not image
             continue
         im_tok = crop_token(recovered_image, im_idx, pad=2)
         node_labels[tok] = im_tok.resize((45, 45))
@@ -123,7 +127,6 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
     fn_attention = state.attention_key + '_attn.pt'
     fn_xattention = state.attention_key + '_xattn.pt'
     recovered_image = state.recovered_image
-    first_im_token_idx = state.image_idx
     generated_text = state.output_ids_decoded
 
     is_openvla = getattr(state, 'is_openvla', False)
@@ -160,7 +163,8 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         ignore_first = getattr(state, 'enc_kv_ignore_first', 0)
         N_img = g_rows * g_cols
         N_txt = len(generated_text)
-        N = N_img + N_txt
+        N_txt_eff = min(N_txt, len(xattn))
+        N = N_img + N_txt_eff
         # Use the last layer
         # Determine heads from first token
         first_tok_last = xattn[0][-1].squeeze()  # [H,Q,K] or [H,K]
@@ -171,7 +175,7 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         num_heads = first_tok_last.shape[0]
         full_attention = np.zeros((num_heads, N, N))
         # Bottom-left: text->image from cross-attn
-        for t in range(N_txt):
+        for t in range(N_txt_eff):
             mh = xattn[t][-1].squeeze()
             if mh.dim() == 3:
                 mh = mh[:, -1, :]
@@ -181,19 +185,23 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
             full_attention[:, N_img + t, :N_img] = kv.detach().cpu().numpy()
         # Bottom-right: text->text from decoder self-attn if available, else small identity
         if attentions is not None:
-            dec_last = attentions[0][-1].squeeze()  # [H,Q,K]
-            if dec_last.dim() == 2:
-                dec_last = dec_last.unsqueeze(1)
-            Q, K = dec_last.shape[-2], dec_last.shape[-1]
-            q_start = max(0, Q - N_txt)
-            k_start = max(0, K - N_txt)
-            for h in range(num_heads):
-                block = dec_last[h, q_start:, k_start:].detach().cpu().numpy()
-                Hq, Hk = block.shape
-                full_attention[h, N_img:N_img+Hq, N_img:N_img+Hk] = block
+            try:
+                dec_last = attentions[0][-1].squeeze()  # [H,Q,K]
+                if dec_last.dim() == 2:
+                    dec_last = dec_last.unsqueeze(1)
+                Q, K = dec_last.shape[-2], dec_last.shape[-1]
+                q_start = max(0, Q - N_txt_eff)
+                k_start = max(0, K - N_txt_eff)
+                for h in range(num_heads):
+                    block = dec_last[h, q_start:, k_start:].detach().cpu().numpy()
+                    Hq, Hk = block.shape
+                    full_attention[h, N_img:N_img+Hq, N_img:N_img+Hk] = block
+            except Exception:
+                for h in range(num_heads):
+                    full_attention[h, N_img:N, N_img:N] = np.eye(N_txt_eff) * 1e-3
         else:
             for h in range(num_heads):
-                full_attention[h, N_img:N, N_img:N] = np.eye(N_txt) * 1e-3
+                full_attention[h, N_img:N, N_img:N] = np.eye(N_txt_eff) * 1e-3
         # Top-left: image->image unknown; set weak identity
         for h in range(num_heads):
             full_attention[h, :N_img, :N_img] = np.eye(N_img) * 1e-6
@@ -215,8 +223,12 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         att_th = att_th_ext
 
     heads_to_analyse = list(range(num_heads))
-
-    token_to_explain = attention_len - len(generated_text) + int(token_to_explain.split('_')[0])
+    if not is_openvla:
+        token_to_explain = attention_len - len(generated_text) + int(token_to_explain.split('_')[0])
+    else:
+        idx_local = int(token_to_explain.split('_')[0])
+        idx_local = min(max(0, idx_local), max(0, N_txt_eff - 1))
+        token_to_explain = N_img + idx_local
     logger.info(f'Using token index {token_to_explain} for explaining')
 
     # ---***------***------***------***------***------***------***------***------***------***------***------***---

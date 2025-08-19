@@ -320,44 +320,72 @@ def construct_relevancy_map(tokenizer, model, input_ids, tokens, outputs, output
 def construct_relevancy_map_openvla(tokenizer, model, outputs, tokens, enc_grid_rows, enc_grid_cols, apply_normalization=True, enc_kv_ignore_first: int = 0, progress=gr.Progress(track_tqdm=True)):
     """Construct per-token relevancy maps for OpenVLA/ECoT models using cross-attention.
 
-    This mirrors the LLAVA relevancy computation but operates on decoder cross-attention
-    over encoder keys. If gradient-enabled attention tensors are available (via hooks),
-    it applies Grad-CAM (rule 5) per head before aggregating.
+    Mirrors the LLAVA relevancy computation but operates on decoder cross-attention over
+    encoder keys. Performs a backward pass per generated token to obtain gradients on
+    the returned cross-attention tensors. Falls back to attention-only if grads are
+    unavailable.
     """
     xatts = getattr(outputs, 'cross_attentions', None)
     if xatts is None:
         logger.warning('No cross_attentions found on outputs; skipping OpenVLA relevancy')
         return {"vit": {}, "all": {}}
 
-    # Hooks may have collected gradient-enabled tensors; may be fewer/more than exact mapping
-    grad_tensors = getattr(model, 'enc_attn_weights_xattn', [])
+    # number of generated tokens (scores tensors should align with cross-attn steps)
+    scores = getattr(outputs, 'scores', None)
+    if scores is None:
+        logger.warning('No scores found on outputs; cannot backprop for relevancy')
+        return {"vit": {}, "all": {}}
 
     word_rel_maps_vit = {}
-    T = len(tokens)
+    T = min(len(tokens), len(scores), len(xatts))
+    eps = 1e-12
     for t in tqdm(range(T), desc="Building OpenVLA relevancy maps"):
-        per_layer = []
         layers = xatts[t]
+        # Try to enable gradient collection on returned cross-attn tensors
         for l, att in enumerate(layers):
-            # att: [B, H, Q, K]; take last query position
             if att is None:
                 continue
-            A = att[:, :, -1, :]  # [B,H,K]
-            # Slice keys to ignore special tokens and match grid size
+            try:
+                att.retain_grad()
+            except Exception:
+                pass
+        # One-hot backward on the token's logits, similar to LLAVA path
+        try:
+            token_logits = scores[t]
+            # Choose the actually generated token id from max logit index
+            token_id = torch.argmax(token_logits, dim=-1)
+            if token_id.ndim > 1:
+                token_id = token_id.view(-1)[0]
+            token_id_one_hot = torch.nn.functional.one_hot(token_id, num_classes=token_logits.size(-1)).float()
+            token_id_one_hot = token_id_one_hot.view(1, -1)
+            model.zero_grad()
+            token_logits.backward(gradient=token_id_one_hot, retain_graph=True)
+        except Exception:
+            # If backward fails, proceed with attention-only CAM
+            pass
+
+        per_layer = []
+        for l, att in enumerate(layers):
+            if att is None:
+                continue
+            # att: [B, H, Q, K]; take last query position
+            A = att[:, :, -1, :]
             start = max(0, int(enc_kv_ignore_first))
             want = enc_grid_rows * enc_grid_cols
             A = A[..., start:start + want]
-            if l < len(grad_tensors) and grad_tensors[l] is not None and getattr(grad_tensors[l], 'grad', None) is not None:
+            G = getattr(att, 'grad', None)
+            if G is not None:
                 try:
-                    G = grad_tensors[l].grad[:, :, -1, :]
+                    G = G[:, :, -1, :]
                     G = G[..., start:start + want]
                     cam = (G.clamp(min=0) * A).mean(dim=1)  # [B,K]
                 except Exception:
                     cam = A.mean(dim=1)
             else:
                 cam = A.mean(dim=1)
-            v = cam[0]  # [K]
+            v = cam[0]
             # Normalize and reshape to grid
-            v = (v - v.min()) / (v.max() - v.min() + 1e-12)
+            v = (v - v.min()) / (v.max() - v.min() + eps)
             K = v.shape[-1]
             if K >= want:
                 v = v[:want]

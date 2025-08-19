@@ -67,6 +67,7 @@ def get_processor_model(args):
         # Register hooks on decoder cross-attention modules to capture attention weights with gradients
         def xattn_forward_hook(module, inputs, output):
             attn = None
+            # HF convention: outputs = (hidden_states, attn_weights, ...)
             if isinstance(output, tuple) and len(output) > 1:
                 attn = output[1]
             if attn is not None:
@@ -78,9 +79,10 @@ def get_processor_model(args):
                     pass
             return output
         try:
+            # Prefer modules whose names indicate cross/encoder attention
             for name, m in model.named_modules():
                 lname = name.lower()
-                if ('cross' in lname or 'encoder_attn' in lname) and ('vision' not in lname):
+                if ('cross' in lname or 'encoder_attn' in lname or 'enc_attn' in lname) and ('vision' not in lname):
                     try:
                         m.register_forward_hook(xattn_forward_hook)
                     except Exception:

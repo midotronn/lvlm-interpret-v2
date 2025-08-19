@@ -173,8 +173,7 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
         N_txt = len(generated_text)
         N_txt_eff = min(N_txt, len(xattn))
         N = N_img + N_txt_eff
-        # Use the last layer
-        # Determine heads from first token
+        # Determine heads and tensor layout from first token, last layer
         first_tok_last = xattn[0][-1].squeeze()  # [H,Q,K] or [H,K]
         if first_tok_last.dim() == 1:
             first_tok_last = first_tok_last.unsqueeze(0)
@@ -182,16 +181,40 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
             first_tok_last = first_tok_last[:, -1, :]
         num_heads = first_tok_last.shape[0]
         full_attention = np.zeros((num_heads, N, N))
-        # Bottom-left: text->image from cross-attn
+
+        # Bottom-left: text->image from cross-attn (last query position)
         for t in range(N_txt_eff):
             mh = xattn[t][-1].squeeze()
             if mh.dim() == 3:
                 mh = mh[:, -1, :]
-            # slice K to grid window
             kv = mh[:, ignore_first:ignore_first + N_img]
             kv = kv[:, :N_img]
             full_attention[:, N_img + t, :N_img] = kv.detach().cpu().numpy()
-        # Bottom-right: text->text from decoder self-attn if available, else small identity
+
+        # Top-right: approximate image->text as the transpose of text->image (symmetrize co-attn influence)
+        for h in range(num_heads):
+            full_attention[h, :N_img, N_img:N] = full_attention[h, N_img:N, :N_img].T
+
+        # Top-left: image->image proxy using image co-attention similarity across text queries
+        # Build an image-image similarity by averaging outer-products of normalized co-attn vectors
+        eps = 1e-12
+        for h in range(num_heads):
+            img_img = np.zeros((N_img, N_img), dtype=np.float32)
+            for t in range(N_txt_eff):
+                v = full_attention[h, N_img + t, :N_img]
+                s = np.linalg.norm(v) + eps
+                v_n = v / s
+                img_img += np.outer(v_n, v_n)
+            if N_txt_eff > 0:
+                img_img /= float(N_txt_eff)
+            # Row-normalize and add small identity for stability
+            row_sum = img_img.sum(axis=1, keepdims=True)
+            row_sum[row_sum == 0] = 1.0
+            img_img = img_img / row_sum
+            img_img = 0.99 * img_img + 0.01 * np.eye(N_img, dtype=np.float32)
+            full_attention[h, :N_img, :N_img] = img_img
+
+        # Bottom-right: text->text from decoder self-attn if available; else use a weakly informative banded matrix
         if attentions is not None:
             try:
                 dec_last = attentions[0][-1].squeeze()  # [H,Q,K]
@@ -205,14 +228,20 @@ def handle_causality(state, state_causal_explainers, token_to_explain, alpha_ext
                     Hq, Hk = block.shape
                     full_attention[h, N_img:N_img+Hq, N_img:N_img+Hk] = block
             except Exception:
-                for h in range(num_heads):
-                    full_attention[h, N_img:N, N_img:N] = np.eye(N_txt_eff) * 1e-3
-        else:
-            for h in range(num_heads):
-                full_attention[h, N_img:N, N_img:N] = np.eye(N_txt_eff) * 1e-3
-        # Top-left: image->image unknown; set weak identity
+                pass
+        # If decoder self-attn was missing or empty, fill with a banded matrix instead of near-zero identity
         for h in range(num_heads):
-            full_attention[h, :N_img, :N_img] = np.eye(N_img) * 1e-6
+            block = full_attention[h, N_img:N, N_img:N]
+            if not np.any(block):
+                I = np.eye(N_txt_eff, dtype=np.float32)
+                # Banded with ones on diag and 0.5 on first off-diagonals to reflect autoregressive coupling
+                band = I.copy()
+                for i in range(N_txt_eff-1):
+                    band[i, i+1] = 0.5
+                    band[i+1, i] = 0.5
+                # Row-normalize
+                band = band / band.sum(axis=1, keepdims=True)
+                full_attention[h, N_img:N, N_img:N] = band
 
     # Sizes:
     # Number of heads: {num_heads}, attention size: {attention_len}x{attention_len}
